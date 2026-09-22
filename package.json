@@ -1,0 +1,27 @@
+{
+  "name": "mentat",
+  "version": "1.0.0",
+  "description": "High-Speed Cognitive Browser Pilot Powered by System 1 ModernBERT Inference",
+  "main": "background.js",
+  "type": "module",
+  "scripts": {
+    "pack": "node -e \"console.log('Load directory directly via chrome://extensions (Developer mode -> Load unpacked)')\""
+  },
+  "keywords": [
+    "mentat",
+    "browser-extension",
+    "system-1",
+    "webgpu",
+    "modernbert",
+    "voice-to-action",
+    "ai-agent",
+    "automation",
+    "dune"
+  ],
+  "author": "Mushthaq azeez",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mushthaqazeez/mentat.git"
+  }
+}
