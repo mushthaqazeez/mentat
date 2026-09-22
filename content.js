@@ -338,6 +338,68 @@
       return;
     }
 
+    if (intent.type === "ACTION_NAV") {
+      const t0 = performance.now();
+      if (intent.action === "back") {
+        // Look for in-page back buttons (e.g. Gmail's "Back to Inbox", back buttons with aria-label or tooltip)
+        const backBtn = document.querySelector(
+          '[aria-label*="Back" i], [title*="Back" i], [data-tooltip*="Back" i], div[act="19"], button.back-btn, a.back-btn'
+        );
+        const latency = Number((performance.now() - t0).toFixed(2));
+        latencyEl.innerText = `${latency}ms`;
+
+        if (backBtn && backBtn.offsetParent !== null) {
+          drawTargetLock(backBtn, 0.98, latency);
+          statusEl.innerText = `Target Lock: Back Button (${backBtn.getAttribute("aria-label") || "Back"}). Navigating...`;
+          setTimeout(() => {
+            backBtn.click();
+            clearTargetLock();
+            toggleHud(false);
+          }, 350);
+          return;
+        }
+
+        // Fallback: Browser history back
+        statusEl.innerText = "Executing browser history back...";
+        setTimeout(() => {
+          window.history.back();
+          toggleHud(false);
+        }, 200);
+        return;
+      }
+
+      if (intent.action === "forward") {
+        statusEl.innerText = "Executing browser forward...";
+        setTimeout(() => {
+          window.history.forward();
+          toggleHud(false);
+        }, 200);
+        return;
+      }
+
+      if (intent.action === "refresh") {
+        statusEl.innerText = "Reloading page...";
+        setTimeout(() => window.location.reload(), 250);
+        return;
+      }
+
+      if (intent.action === "scroll_down") {
+        window.scrollBy({ top: window.innerHeight * 0.75, behavior: "smooth" });
+        statusEl.innerText = "Scrolled down.";
+        latencyEl.innerText = "2ms";
+        setTimeout(() => toggleHud(false), 600);
+        return;
+      }
+
+      if (intent.action === "scroll_up") {
+        window.scrollBy({ top: -window.innerHeight * 0.75, behavior: "smooth" });
+        statusEl.innerText = "Scrolled up.";
+        latencyEl.innerText = "2ms";
+        setTimeout(() => toggleHud(false), 600);
+        return;
+      }
+    }
+
     if (intent.type === "ACTION_BATCH_COLOR") {
       statusEl.innerText = "Harvesting inbox email list...";
       const emails = harvestEmailRows();

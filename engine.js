@@ -130,6 +130,21 @@ window.MentatEngine = (() => {
       return { type: "ACTION_RESET" };
     }
 
+    // Browser / View Navigation Intents
+    const navPatterns = {
+      back: /^(go\s+)?back$|^return$|^previous(\s+page)?$/i,
+      forward: /^(go\s+)?forward$|^next(\s+page)?$/i,
+      refresh: /^refresh$|^reload$/i,
+      scroll_down: /^scroll\s+down$|^page\s+down$|^down$/i,
+      scroll_up: /^scroll\s+up$|^page\s+up$|^up$/i,
+    };
+
+    for (const [action, pattern] of Object.entries(navPatterns)) {
+      if (pattern.test(lower)) {
+        return { type: "ACTION_NAV", action };
+      }
+    }
+
     const colorVerbs = ["color", "colour", "dim", "blacken", "highlight all", "filter", "darken", "shade"];
     const mailKeywords = ["mail", "mails", "email", "emails", "inbox", "spam", "junk", "noise", "promo"];
 
@@ -300,25 +315,43 @@ window.MentatEngine = (() => {
     }
 
     // Fast fallback token grounding
-    const clean = rawCmd.toLowerCase().replace(/^(click\s+(on\s+)?|open\s+|go\s+to\s+)/i, "").trim();
-    let bestScore = -999;
-    let bestCandidate = candidates[0];
+    const clean = rawCmd.toLowerCase().replace(/^(click\s+(on\s+)?|open\s+|go\s+to\s+|navigate\s+to\s+)/i, "").trim();
+    const queryTokens = clean.split(/\s+/).filter((w) => w.length > 1 && !["the", "and", "for", "with", "this"].includes(w));
+    
+    let bestScore = -1;
+    let secondBestScore = -1;
+    let bestCandidate = null;
 
     candidates.forEach((cand) => {
-      const txt = `${cand.text} ${cand.ariaLabel}`.toLowerCase();
+      const full = `${cand.text} ${cand.ariaLabel} ${cand.title} ${cand.placeholder}`.toLowerCase();
       let score = 0;
-      if (txt.includes(clean)) score += 10;
+      
+      if (clean && full.includes(clean)) {
+        score += 20;
+      }
+      
+      queryTokens.forEach((token) => {
+        if (full.includes(token)) score += 5;
+      });
+
       if (score > bestScore) {
+        secondBestScore = bestScore;
         bestScore = score;
         bestCandidate = cand;
+      } else if (score > secondBestScore) {
+        secondBestScore = score;
       }
     });
 
+    const isActionable = bestScore > 0;
+    const prob = isActionable ? Math.min(0.98, Number((0.5 + (bestScore / 40)).toFixed(2))) : 0.05;
+    const conf = isActionable ? Math.max(0.1, Number(((bestScore - Math.max(0, secondBestScore)) / (bestScore + 1)).toFixed(2))) : 0.0;
+
     return {
-      winner: bestCandidate,
-      confidence: 0.95,
-      probability: 0.95,
-      isActionable: bestScore > 0,
+      winner: isActionable ? bestCandidate : null,
+      confidence: conf,
+      probability: prob,
+      isActionable,
       latencyMs: Number((performance.now() - t0).toFixed(2)),
       totalCandidates: candidates.length,
       neuralEngine: "Fast Token Fallback",
