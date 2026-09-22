@@ -9,6 +9,8 @@ window.MentatEngine = (() => {
   let initPromise = null;
   let conceptVectors = null; // [AnchorPromo, AnchorCritical]
 
+  let intentVectors = null; // Pre-computed vector embeddings for action intents
+
   /**
    * Numerically stable softmax with temperature scaling
    */
@@ -73,7 +75,7 @@ window.MentatEngine = (() => {
           quantized: true,
         });
 
-        // Pre-compute neural concept anchors for classification
+        // 1. Pre-compute neural concept anchors for classification
         console.log("[Mentat Neural] Pre-computing semantic concept anchors in vector space...");
         const anchors = [
           "unsolicited promotional marketing, newsletter, spam, job alerts, deals, and automated notifications",
@@ -88,7 +90,25 @@ window.MentatEngine = (() => {
           dim,
         };
 
-        console.log(`[✓] Mentat Neural Transformer ready on WebGPU/WASM (Vector Dim: ${dim}).`);
+        // 2. Pre-compute Action Intent Anchors (Approach A: Semantic Intent Vector Space)
+        const intentAnchorDefs = {
+          ACTION_NAV: "navigate backward, go back, return to previous page, forward, reload, or scroll view",
+          ACTION_BATCH_COLOR: "color, highlight, filter, or dim emails in the inbox list by category or spam",
+          ACTION_RESET: "reset, clear, restore normal view, remove color grading and styling",
+          ACTION_MOTOR: "click, select, open, or focus a specific interactive element or button on the screen",
+        };
+
+        const intentKeys = Object.keys(intentAnchorDefs);
+        const intentTexts = Object.values(intentAnchorDefs);
+        const intentEmbeds = await extractorPipeline(intentTexts, { pooling: "mean", normalize: true });
+
+        intentVectors = {
+          dim,
+          keys: intentKeys,
+          vectors: intentKeys.map((key, i) => Array.from(intentEmbeds.data.slice(i * dim, (i + 1) * dim))),
+        };
+
+        console.log(`[✓] Mentat Neural Affordance Transformer ready on WebGPU/WASM (Vector Dim: ${dim}).`);
         return extractorPipeline;
       } catch (err) {
         console.error("[Mentat Neural] Error initializing neural model:", err);
@@ -120,49 +140,57 @@ window.MentatEngine = (() => {
   }
 
   /**
-   * Detect command intent (Reset vs Batch Color vs Motor Action)
+   * APPROACH A: Vector-Projected Intent Classifier (Zero Manual Keyword Dictionaries)
    */
-  function detectCommandIntent(command) {
+  async function detectCommandIntent(command) {
     const lower = command.trim().toLowerCase();
 
-    if (
-      lower === "reset" ||
-      lower === "clear" ||
-      lower.includes("clear color") ||
-      lower.includes("remove color") ||
-      lower.includes("reset color")
-    ) {
+    // Fast instant check for unambiguous control tokens
+    if (lower === "reset" || lower === "clear" || lower === "clear colors") {
       return { type: "ACTION_RESET" };
     }
 
-    // Browser / View Navigation Intents
-    const navPatterns = {
-      back: /^(go\s+)?back$|^return$|^previous(\s+page)?$/i,
-      forward: /^(go\s+)?forward$|^next(\s+page)?$/i,
-      refresh: /^refresh$|^reload$/i,
-      scroll_down: /^scroll\s+down$|^page\s+down$|^down$/i,
-      scroll_up: /^scroll\s+up$|^page\s+up$|^up$/i,
-    };
+    // If neural intent space is ready, project command onto intent vectors
+    await initNeuralModel();
+    if (extractorPipeline && intentVectors) {
+      try {
+        const cmdEmbed = await extractorPipeline(command, { pooling: "mean", normalize: true });
+        const cmdVec = Array.from(cmdEmbed.data);
+        const sims = intentVectors.vectors.map((vec) => cosineSimilarity(cmdVec, vec));
+        const maxIdx = sims.indexOf(Math.max(...sims));
+        const detectedType = intentVectors.keys[maxIdx];
 
-    for (const [action, pattern] of Object.entries(navPatterns)) {
-      if (pattern.test(lower)) {
-        return { type: "ACTION_NAV", action };
+        if (detectedType === "ACTION_NAV") {
+          const isForward = lower.includes("forward") || lower.includes("next");
+          const isScrollDown = lower.includes("down");
+          const isScrollUp = lower.includes("up");
+          const isRefresh = lower.includes("refresh") || lower.includes("reload");
+          return {
+            type: "ACTION_NAV",
+            action: isForward ? "forward" : isScrollDown ? "scroll_down" : isScrollUp ? "scroll_up" : isRefresh ? "refresh" : "back",
+            confidence: Number(sims[maxIdx].toFixed(2)),
+          };
+        }
+
+        if (detectedType === "ACTION_BATCH_COLOR") {
+          return {
+            type: "ACTION_BATCH_COLOR",
+            targetMode: lower.includes("important") && !lower.includes("non") ? "HIGHLIGHT_IMPORTANT" : "DIM_SPAM",
+            confidence: Number(sims[maxIdx].toFixed(2)),
+          };
+        }
+
+        return { type: detectedType, confidence: Number(sims[maxIdx].toFixed(2)) };
+      } catch (err) {
+        console.warn("[Mentat Neural] Vector intent projection error, falling back:", err);
       }
     }
 
-    const colorVerbs = ["color", "colour", "dim", "blacken", "highlight all", "filter", "darken", "shade"];
-    const mailKeywords = ["mail", "mails", "email", "emails", "inbox", "spam", "junk", "noise", "promo"];
-
-    const hasColorVerb = colorVerbs.some((v) => lower.includes(v));
-    const hasMailNoun = mailKeywords.some((n) => lower.includes(n));
-
-    if (hasColorVerb && hasMailNoun) {
-      return {
-        type: "ACTION_BATCH_COLOR",
-        targetMode: lower.includes("important") && !lower.includes("non important") && !lower.includes("unimportant") ? "HIGHLIGHT_IMPORTANT" : "DIM_SPAM",
-      };
+    // Fallback: heuristic check if neural engine is still cold
+    if (lower.includes("back") || lower.includes("return")) return { type: "ACTION_NAV", action: "back" };
+    if (lower.includes("color") || lower.includes("colour") || lower.includes("dim") || lower.includes("spam")) {
+      return { type: "ACTION_BATCH_COLOR", targetMode: "DIM_SPAM" };
     }
-
     return { type: "ACTION_MOTOR" };
   }
 
@@ -175,7 +203,7 @@ window.MentatEngine = (() => {
 
     // If neural pipeline is ready, use pure vector distances
     if (conceptVectors && extractorPipeline) {
-      const textsToEmbed = emails.map((e) => `${e.sender}: ${e.subject}`).slice(0, 50);
+      const textsToEmbed = emails.map((e) => `[EMAIL: Sender "${e.sender}", Subject "${e.subject}"]`).slice(0, 50);
       const emailEmbeds = await embedTexts(textsToEmbed);
 
       if (emailEmbeds) {
@@ -220,16 +248,16 @@ window.MentatEngine = (() => {
       }
     }
 
-    // Fallback: Statistical n-gram vector affinity
+    // Fallback if neural engine is warming: statistical length & token entropy
     const fallbackResults = emails.map((item) => {
-      const full = `${item.sender} ${item.subject}`.toLowerCase();
-      const isNoise = full.includes("alert") && (full.includes("job") || full.includes("naukri") || full.includes("linkedin") || full.includes("digest"));
+      const full = `${item.sender} ${item.subject}`;
+      const isUnsolicited = full.length > 75 || full.includes("unsubscribe") || full.includes("%") || full.includes("sale");
       return {
         item,
-        category: isNoise ? "spam" : "important",
-        probSpam: isNoise ? 0.85 : 0.15,
-        probImportant: isNoise ? 0.15 : 0.85,
-        confidence: 0.70,
+        category: isUnsolicited ? "spam" : "important",
+        probSpam: isUnsolicited ? 0.75 : 0.25,
+        probImportant: isUnsolicited ? 0.25 : 0.75,
+        confidence: 0.50,
       };
     });
 
@@ -244,9 +272,9 @@ window.MentatEngine = (() => {
   }
 
   /**
-   * TRUE NEURAL MOTOR GROUNDING: Converts user intent & screen candidates to vectors
+   * APPROACH A: UI Action & Affordance-Trained Vector Grounding
    */
-  async function groundCommandToElements(userCommand, candidates) {
+  async function groundCommandToElements(userCommand, candidates, pageState = null) {
     const t0 = performance.now();
     const rawCmd = userCommand.trim();
 
@@ -266,30 +294,34 @@ window.MentatEngine = (() => {
             isActionable: true,
             latencyMs: Number((performance.now() - t0).toFixed(2)),
             totalCandidates: candidates.length,
-            neuralEngine: "Ordinal Grounding",
+            neuralEngine: "Ordinal Affordance Grounding",
           };
         }
       }
     }
 
+    // Contextual Action Goal Formulation
+    const stateDesc = pageState?.description || (candidates.some((c) => c.isEmailRow) ? "Viewing email inbox list" : "Web page view");
+    const contextualGoal = `Context: ${stateDesc}. Action goal: ${rawCmd}`;
+
     // Try Neural Vector Matching if model is ready
     await initNeuralModel();
     if (extractorPipeline) {
       try {
-        const queryEmbed = await extractorPipeline(rawCmd, { pooling: "mean", normalize: true });
+        const queryEmbed = await extractorPipeline(contextualGoal, { pooling: "mean", normalize: true });
         const qVec = Array.from(queryEmbed.data);
         const dim = qVec.length;
 
-        const candidateTexts = candidates.map((c) => `${c.text} ${c.ariaLabel} ${c.placeholder}`.slice(0, 120));
-        const cEmbeds = await extractorPipeline(candidateTexts, { pooling: "mean", normalize: true });
+        // Use synthesized affordance descriptors:
+        // [AFFORDANCE: navigate_back | ROLE: button | LOCATION: top_toolbar | LABEL: 'Back to Inbox' | ICON: arrow_left]
+        const candidateDescriptors = candidates.map((c) => c.affordanceStr || `${c.text} ${c.ariaLabel} ${c.placeholder}`.slice(0, 140));
+        const cEmbeds = await extractorPipeline(candidateDescriptors, { pooling: "mean", normalize: true });
 
         const similarities = candidates.map((cand, i) => {
           let sim = cosineSimilarity(qVec, cEmbeds.data, i * dim);
-          if (cand.isEmailRow) sim += 0.05;
-          return { cand, sim: sim * 6.0 }; // Logit scaling
+          return { cand, sim: sim * 12.0 }; // Logit scaling factor = 12.0
         });
 
-        const labels = candidates.map((c) => c.text);
         const rawLogits = similarities.map((s) => s.sim);
         const probs = softmax(rawLogits, VON_TEMPERATURE);
 
@@ -309,17 +341,17 @@ window.MentatEngine = (() => {
           winner: candidates[bestIdx],
           confidence,
           probability: Number(maxProb.toFixed(4)),
-          isActionable: maxProb >= 0.15,
+          isActionable: maxProb >= 0.20,
           latencyMs: Number((performance.now() - t0).toFixed(2)),
           totalCandidates: candidates.length,
-          neuralEngine: "Transformers.js WebGPU/WASM",
+          neuralEngine: "Approach A WebGPU/WASM Affordance Engine",
         };
       } catch (err) {
-        console.warn("[Mentat Neural] Direct vector embedding failed, falling back to fast n-gram grounding:", err);
+        console.warn("[Mentat Neural] Affordance vector embedding failed, falling back to fast token match:", err);
       }
     }
 
-    // Fast fallback token grounding
+    // Fast fallback token grounding (matches across full affordance descriptor)
     const clean = rawCmd.toLowerCase().replace(/^(click\s+(on\s+)?|open\s+|go\s+to\s+|navigate\s+to\s+)/i, "").trim();
     const queryTokens = clean.split(/\s+/).filter((w) => w.length > 1 && !["the", "and", "for", "with", "this"].includes(w));
     
@@ -328,7 +360,7 @@ window.MentatEngine = (() => {
     let bestCandidate = null;
 
     candidates.forEach((cand) => {
-      const full = `${cand.text} ${cand.ariaLabel} ${cand.title} ${cand.placeholder}`.toLowerCase();
+      const full = `${cand.affordanceStr || ""} ${cand.text} ${cand.ariaLabel} ${cand.title} ${cand.placeholder}`.toLowerCase();
       let score = 0;
       
       if (clean && full.includes(clean)) {
@@ -359,7 +391,7 @@ window.MentatEngine = (() => {
       isActionable,
       latencyMs: Number((performance.now() - t0).toFixed(2)),
       totalCandidates: candidates.length,
-      neuralEngine: "Fast Token Fallback",
+      neuralEngine: "Fast Affordance Fallback",
     };
   }
 
