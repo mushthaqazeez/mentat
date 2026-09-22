@@ -46,18 +46,23 @@ window.MentatEngine = (() => {
       isInitializing = true;
       console.log(`[Mentat Neural] Initializing local transformer encoder (${MODEL_ID})...`);
 
-      // Configure Transformers.js environment
-      if (window.transformers && window.transformers.env) {
-        const env = window.transformers.env;
-        env.allowLocalModels = false;
-        env.useBrowserCache = true;
+      let pipelineFn = window.pipeline || (window.transformers && window.transformers.pipeline);
 
-        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.getURL) {
-          env.backends.onnx.wasm.wasmPaths = chrome.runtime.getURL("/");
+      if (!pipelineFn && typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.getURL) {
+        try {
+          const modUrl = chrome.runtime.getURL("transformers.min.js");
+          const mod = await import(modUrl);
+          pipelineFn = mod.pipeline;
+          if (mod.env) {
+            mod.env.allowLocalModels = false;
+            mod.env.useBrowserCache = true;
+            mod.env.backends.onnx.wasm.wasmPaths = chrome.runtime.getURL("");
+          }
+        } catch (e) {
+          console.warn("[Mentat Neural] Dynamic ES module import of transformers failed:", e);
         }
       }
 
-      const pipelineFn = window.pipeline || (window.transformers && window.transformers.pipeline);
       if (!pipelineFn) {
         console.warn("[Mentat Neural] Transformers.js pipeline not globally available, falling back to embedded runtime.");
         return null;
